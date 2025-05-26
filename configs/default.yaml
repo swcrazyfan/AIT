@@ -1,0 +1,78 @@
+name: "default"
+description: "Standard processing pipeline with incremental saves"
+version: "1.0"
+
+global_settings:
+  supabase_url: "${SUPABASE_URL}"
+  supabase_key: "${SUPABASE_ANON_KEY}"
+  save_immediately: true  # Each step saves its results
+
+steps:
+  - category: checksum
+    name: md5_checksum
+    config:
+      enabled: true
+      queue: metadata
+      priority: 10
+      retry: 2
+
+  - category: metadata
+    name: ffmpeg_extractor
+    config:
+      enabled: true
+      queue: metadata
+      priority: 20
+      retry: 3
+      save_partial: true  # Save basic info first, then detailed
+      params:
+        extract_streams: true
+
+  - category: thumbnails
+    name: parallel_thumbs
+    config:
+      enabled: true
+      queue: thumbnails
+      priority: 30
+      params:
+        count: 5
+        width: 1920
+        quality: 90
+
+  - category: compression
+    name: ffmpeg_compress
+    config:
+      enabled: true
+      queue: compression
+      priority: 40
+      params:
+        codec: "hevc_videotoolbox"
+        bitrate: "1000k"
+        fps: 5
+
+  - category: ai_analysis
+    name: gemini_analyzer # Plan uses gemini_streaming, diagram gemini_analyzer
+    config:
+      enabled: false  # Enable with --enable-ai flag
+      queue: ai_analysis
+      priority: 50
+      timeout: 600
+      save_partial: true  # Stream results as they come
+      params:
+        api_key: "${GEMINI_API_KEY}"
+        model: "gemini-2.5-flash"
+
+  - category: embeddings
+    name: bge_embeddings
+    config:
+      enabled: false
+      queue: embeddings
+      priority: 60
+      params:
+        api_key: "${DEEPINFRA_API_KEY}"
+
+worker_config:
+  metadata: 8
+  thumbnails: 4
+  compression: 2
+  ai_analysis: 1
+  embeddings: 4

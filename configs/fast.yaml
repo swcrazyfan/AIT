@@ -1,0 +1,37 @@
+name: "fast"
+description: "Quick processing - parallel steps, no AI"
+version: "1.0"
+
+global_settings:
+  supabase_url: "${SUPABASE_URL}"
+  supabase_key: "${SUPABASE_ANON_KEY}"
+
+steps:
+  - category: checksum
+    name: blake3_checksum  # Faster than MD5
+    config:
+      enabled: true
+      queue: metadata
+
+  # These two can run in parallel!
+  - category: metadata
+    name: ffmpeg_extractor
+    config:
+      enabled: true
+      queue: metadata
+      params:
+        basic_only: true  # Just duration, resolution
+
+  - category: thumbnails
+    name: ffmpeg_thumbs  # Faster than OpenCV
+    config:
+      enabled: true
+      queue: thumbnails
+      params:
+        count: 3
+        width: 1280
+      parallel: true  # Can run while metadata runs
+
+worker_config:
+  metadata: 16  # High parallelism
+  thumbnails: 8

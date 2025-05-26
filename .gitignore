@@ -1,1 +1,12 @@
 .DS_Store
+/video_tool/__pycache__
+/video_tool/core/__pycache__
+/video_tool/steps/ai_analysis/__pycache__
+/video_tool/steps/checksum/__pycache__
+/video_tool/steps/compression/__pycache__
+/video_tool/steps/embeddings/__pycache__
+/video_tool/steps/metadata/__pycache__
+/video_tool/steps/storage/__pycache__
+/video_tool/steps/thumbnails/__pycache__
+/video_tool/steps/__pycache__
+/test

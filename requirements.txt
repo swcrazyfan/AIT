@@ -1,0 +1,23 @@
+procrastinate[psycopg]
+supabase
+sqlalchemy[asyncio]
+asyncpg
+python-dotenv
+structlog
+pydantic
+typer[all]
+PyYAML
+tiktoken
+openai
+opencv-python
+transformers
+torch
+Pillow
+pymediainfo
+PyExifTool
+watchdog
+numpy
+python-dateutil
+psycopg-binary
+blake3 # Added for blake3_checksum step
+# Consider specific versions as development progresses

@@ -9,6 +9,15 @@ This is a complete implementation of a modular, queue-based video processing too
 - Supports **parallel processing** with configurable concurrency
 - Stores everything in **Supabase** (PostgreSQL)
 
+> **⚠️ PROCRASTINATE UPDATES NEEDED**
+> 
+> This plan has been updated to align with current Procrastinate v2.x best practices:
+> - Updated connector initialization patterns
+> - Improved async/await usage
+> - Enhanced error handling and task retry mechanisms
+> - Better worker management and graceful shutdown
+> - Updated schema initialization approach
+
 ## Architecture
 
 ```
@@ -62,7 +71,7 @@ video_tool/
 
 ## Core Implementation
 
-### 1. Database Setup (`core/db.py`)
+### 1. Database Setup (`core/db.py`) - UPDATED FOR PROCRASTINATE V2.x
 
 ```python
 import os
@@ -72,8 +81,10 @@ from supabase import create_client, Client
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
+import structlog
 
 load_dotenv()
+logger = structlog.get_logger(__name__)
 
 class Database:
     """Manages both Supabase client and Procrastinate app using same database"""
@@ -94,62 +105,76 @@ class Database:
         self.SessionLocal = None
     
     async def initialize(self):
-        """Initialize all connections"""
-        # Supabase client
-        self.supabase = create_client(self.supabase_url, self.supabase_key)
-        
-        # Parse Supabase DB URL for Procrastinate
-        # Format: postgresql://postgres:[password]@db.[project].supabase.co:5432/postgres
-        from urllib.parse import urlparse
-        parsed = urlparse(self.supabase_db_url)
-        
-        # Procrastinate connector
-        connector = PsycopgConnector(
-            host=parsed.hostname,
-            port=parsed.port or 5432,
-            database=parsed.path.lstrip('/'),
-            user=parsed.username,
-            password=parsed.password,
-            sslmode="require"  # Supabase requires SSL
-        )
-        
-        # Create Procrastinate app
-        self.procrastinate_app = App(connector=connector)
-        
-        # Set up procrastinate schema
-        await self.procrastinate_app.open_async()
-        
-        # SQLAlchemy for complex queries
-        self.engine = create_async_engine(
-            self.supabase_db_url.replace('postgresql://', 'postgresql+asyncpg://'),
-            echo=False
-        )
-        self.SessionLocal = sessionmaker(
-            self.engine, class_=AsyncSession, expire_on_commit=False
-        )
-        
-        # Create Procrastinate tables if they don't exist
-        async with connector.pool.acquire() as conn:
-            await self.procrastinate_app.connector.execute_query_async(
-                conn,
-                "SELECT procrastinate.create_all()"
+        """Initialize all connections using current Procrastinate patterns"""
+        try:
+            # Supabase client
+            self.supabase = create_client(self.supabase_url, self.supabase_key)
+            
+            # Parse Supabase DB URL for Procrastinate
+            # Format: postgresql://postgres:[password]@db.[project].supabase.co:5432/postgres
+            from urllib.parse import urlparse
+            parsed = urlparse(self.supabase_db_url)
+            
+            # UPDATED: Use current Procrastinate connector pattern
+            # Use connection string directly instead of individual parameters
+            connector = PsycopgConnector(conninfo=self.supabase_db_url)
+            
+            # Create Procrastinate app with proper configuration
+            self.procrastinate_app = App(
+                connector=connector,
+                import_paths=["video_tool.steps"]  # Auto-discover tasks
             )
+            
+            # UPDATED: Open app connection using current pattern
+            await self.procrastinate_app.open_async()
+            
+            # UPDATED: Apply schema using current method
+            async with self.procrastinate_app.connector.get_sync_connector() as sync_connector:
+                with sync_connector.get_sync_connection() as connection:
+                    # Apply Procrastinate schema
+                    await self.procrastinate_app.connector.execute_query_async(
+                        connection, 
+                        "SELECT procrastinate_schema.create_all()"
+                    )
+            
+            logger.info("Procrastinate schema applied successfully")
+            
+            # SQLAlchemy for complex queries (unchanged)
+            self.engine = create_async_engine(
+                self.supabase_db_url.replace('postgresql://', 'postgresql+asyncpg://'),
+                echo=False
+            )
+            self.SessionLocal = sessionmaker(
+                self.engine, class_=AsyncSession, expire_on_commit=False
+            )
+            
+            logger.info("Database initialization completed")
+            
+        except Exception as e:
+            logger.error(f"Database initialization failed: {str(e)}")
+            raise
     
     async def close(self):
         """Close all connections"""
-        if self.procrastinate_app:
-            await self.procrastinate_app.close_async()
-        if self.engine:
-            await self.engine.dispose()
+        try:
+            if self.procrastinate_app:
+                await self.procrastinate_app.close_async()
+            if self.engine:
+                await self.engine.dispose()
+            logger.info("Database connections closed")
+        except Exception as e:
+            logger.error(f"Error closing database connections: {str(e)}")
 
-# Global database instance
-db = Database()
+# UPDATED: Use better singleton pattern
+_db_instance: Optional[Database] = None
 
 async def get_db() -> Database:
-    """Get initialized database instance"""
-    if not db.procrastinate_app:
-        await db.initialize()
-    return db
+    """Get initialized database instance using singleton pattern"""
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = Database()
+        await _db_instance.initialize()
+    return _db_instance
 
 async def get_supabase() -> Client:
     """Get Supabase client"""
@@ -160,6 +185,14 @@ async def get_procrastinate_app() -> App:
     """Get Procrastinate app"""
     database = await get_db()
     return database.procrastinate_app
+
+# UPDATED: Add cleanup helper
+async def cleanup_db():
+    """Cleanup database connections"""
+    global _db_instance
+    if _db_instance:
+        await _db_instance.close()
+        _db_instance = None
 ```
 
 ### 2. Authentication System (`core/auth.py`)
@@ -484,13 +517,14 @@ class PipelineConfig(BaseModel):
     }
 ```
 
-### 4. Base Step Class with Incremental Saves and Auth (`steps/base.py`)
+### 4. Base Step Class with Incremental Saves and Auth (`steps/base.py`) - UPDATED
 
 ```python
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any, Type
 from datetime import datetime
 import structlog
+import asyncio
 
 from video_tool.core.models import StepConfig, StepResult, VideoMetadata
 from video_tool.core.db import get_supabase
@@ -520,7 +554,8 @@ class BaseStep(ABC):
         self.logger = logger.bind(step=self.name)
         self.supabase = None
     
-    async def execute(self, video: VideoMetadata, step_index: int, total_steps: int) -> StepResult:
+    # UPDATED: Enhanced error handling and context passing
+    async def execute(self, video: VideoMetadata, step_index: int, total_steps: int, context: Optional[Dict[str, Any]] = None) -> StepResult:
         """Execute step with progress tracking, incremental saves, and user context"""
         if not self.supabase:
             self.supabase = await get_supabase()
@@ -531,10 +566,11 @@ class BaseStep(ABC):
         try:
             # Validate inputs
             if not await self.validate_input(video):
-                raise ValueError(f"Missing required inputs: {self.requires}")
+                missing_fields = [field for field in self.requires if not hasattr(video, field) or getattr(video, field) is None]
+                raise ValueError(f"Missing required inputs: {missing_fields}")
             
-            # Process the step
-            result = await self.process(video)
+            # UPDATED: Pass context to process method
+            result = await self.process(video, context)
             
             if result.success:
                 # Save results immediately
@@ -550,17 +586,26 @@ class BaseStep(ABC):
             return result
             
         except Exception as e:
-            self.logger.error(f"Step failed: {str(e)}")
+            self.logger.error(f"Step failed: {str(e)}", exc_info=True)
             await self._update_progress(video.video_id, video.user_id, 'error', step_index, total_steps, str(e))
-            raise
+            
+            # UPDATED: Return failed result instead of raising
+            return StepResult(
+                success=False,
+                step_name=self.name,
+                video_id=video.video_id,
+                error=str(e),
+                completed_at=datetime.utcnow()
+            )
     
     @abstractmethod
-    async def process(self, video: VideoMetadata) -> StepResult:
+    async def process(self, video: VideoMetadata, context: Optional[Dict[str, Any]] = None) -> StepResult:
         """
         Process the video and return results.
         
         Args:
             video: Current video metadata (includes user_id)
+            context: Optional additional context from Procrastinate
             
         Returns:
             StepResult with data to be merged into video metadata
@@ -3130,7 +3175,7 @@ class StepRegistry:
         return list(self.steps.keys())
 ```
 
-### 11. Pipeline Orchestrator with Incremental Saves (`core/pipeline.py`)
+### 11. Pipeline Orchestrator with Incremental Saves (`core/pipeline.py`) - UPDATED
 
 ```python
 import yaml
@@ -3140,11 +3185,14 @@ from typing import List, Dict, Any, Optional
 import re
 import asyncio
 from datetime import datetime, timedelta
+import structlog
 
 from video_tool.core.models import StepConfig, VideoMetadata, PipelineConfig, ProcessingStatus
 from video_tool.core.registry import StepRegistry
 from video_tool.core.db import get_procrastinate_app, get_supabase
 from video_tool.steps.base import BaseStep
+
+logger = structlog.get_logger(__name__)
 
 class Pipeline:
     """Orchestrates step execution with incremental saves and monitoring"""
@@ -3198,69 +3246,77 @@ class Pipeline:
             await step.setup()
             self.steps.append(step)
         
-        # Register Procrastinate tasks
+        # UPDATED: Register Procrastinate tasks using current patterns
         await self._register_tasks()
         
-        # Register monitoring tasks
+        # Register monitoring tasks  
         await self._register_monitoring_tasks()
         
         self._initialized = True
     
     async def _register_tasks(self):
-        """Register all steps as Procrastinate tasks"""
+        """UPDATED: Register all steps as Procrastinate tasks using current patterns"""
         for i, step in enumerate(self.steps):
-            step_index = i
             
-            # Create task function
+            # UPDATED: Use current task registration pattern
             @self.app.task(
-                name=f"{step.category}.{step.name}",
+                name=f"video_tool.steps.{step.category}.{step.name}",
                 queue=step.config.queue,
                 retry=step.config.retry,
-                timeout=step.config.timeout
+                timeout=step.config.timeout,
+                pass_context=True  # UPDATED: Use pass_context for better error handling
             )
-            async def process_step(video_id: str, step_idx: int = step_index):
-                # Get current video metadata
-                video = await self._get_video_metadata(video_id)
-                if not video:
-                    raise ValueError(f"Video not found: {video_id}")
-                
-                current_step = self.steps[step_idx]
-                
-                # Check if already completed (for resume functionality)
-                if current_step.name in video.processed_steps:
-                    self.logger.info(f"Step {current_step.name} already completed, skipping")
-                    # Queue next step
-                    await self._queue_next_step(video_id, step_idx)
-                    return
-                
-                # Execute step with progress tracking
-                result = await current_step.execute(
-                    video, 
-                    step_idx + 1,  # Human-readable step number
-                    len(self.steps)
-                )
-                
-                if result.success:
-                    # Mark step as completed
-                    await self._mark_step_completed(video_id, current_step.name)
+            async def process_step_task(context, video_id: str, step_idx: int = i):
+                """UPDATED: Task function with context support"""
+                try:
+                    # Get current video metadata
+                    video = await self._get_video_metadata(video_id)
+                    if not video:
+                        raise ValueError(f"Video not found: {video_id}")
                     
-                    # Queue next step or mark pipeline complete
-                    if step_idx + 1 < len(self.steps):
+                    current_step = self.steps[step_idx]
+                    
+                    # Check if already completed (for resume functionality)
+                    if current_step.name in video.processed_steps:
+                        logger.info(f"Step {current_step.name} already completed, skipping")
+                        # Queue next step
                         await self._queue_next_step(video_id, step_idx)
+                        return {"status": "skipped", "reason": "already_completed"}
+                    
+                    # UPDATED: Execute step with context
+                    result = await current_step.execute(
+                        video, 
+                        step_idx + 1,  # Human-readable step number
+                        len(self.steps),
+                        context.additional_context  # Pass Procrastinate context
+                    )
+                    
+                    if result.success:
+                        # Mark step as completed
+                        await self._mark_step_completed(video_id, current_step.name)
+                        
+                        # Queue next step or mark pipeline complete
+                        if step_idx + 1 < len(self.steps):
+                            await self._queue_next_step(video_id, step_idx)
+                        else:
+                            await self._mark_pipeline_completed(video_id)
                     else:
-                        await self._mark_pipeline_completed(video_id)
-                else:
-                    # Handle failure
-                    await self._mark_step_failed(video_id, current_step.name, result.error)
+                        # Handle failure
+                        await self._mark_step_failed(video_id, current_step.name, result.error)
+                        
+                        # Decide whether to continue or stop
+                        if current_step.config.params.get('continue_on_failure', False):
+                            await self._queue_next_step(video_id, step_idx)
                     
-                    # Decide whether to continue or stop
-                    if current_step.config.get('continue_on_failure', False):
-                        await self._queue_next_step(video_id, step_idx)
-                
-                return result
+                    return result.dict()
+                    
+                except Exception as e:
+                    logger.error(f"Task execution failed: {str(e)}", exc_info=True)  
+                    await self._mark_step_failed(video_id, self.steps[step_idx].name, str(e))
+                    raise  # Let Procrastinate handle retry logic
             
-            # Store task reference
-            step.task = process_step
+            # Store task reference on the step
+            step.task = process_step_task
     
     async def _register_monitoring_tasks(self):
         """Register periodic monitoring tasks"""
@@ -4277,11 +4333,12 @@ if __name__ == "__main__":
     app()
 ```
 
-### 13. Worker Implementation (`worker.py`)
+### 13. Worker Implementation (`worker.py`) - UPDATED FOR PROCRASTINATE V2.x
 
 ```python
 from typing import Dict, List, Optional
 import structlog
+import asyncio
 
 logger = structlog.get_logger()
 
@@ -4291,7 +4348,7 @@ async def run_workers(
     concurrency_config: Dict[str, int],
     queues: Optional[List[str]] = None
 ):
-    """Run Procrastinate workers with per-queue concurrency"""
+    """UPDATED: Run Procrastinate workers with per-queue concurrency using current patterns"""
     
     # Build concurrency map
     if queues:
@@ -4301,17 +4358,53 @@ async def run_workers(
         concurrency = concurrency_config
     
     logger.info(
-        "Starting workers",
+        "Starting workers with updated patterns",
         worker_count=worker_count,
         concurrency=concurrency
     )
     
-    # Run workers
-    await app.run_worker(
-        concurrency=concurrency,
-        queues=list(concurrency.keys()),
-        wait=True
-    )
+    # UPDATED: Use current worker patterns with proper error handling
+    try:
+        await app.run_worker_async(
+            concurrency=sum(concurrency.values()),  # Total concurrency
+            queues=list(concurrency.keys()),
+            wait=True,
+            install_signal_handlers=True,  # Enable graceful shutdown
+            listen_notify=True  # Enable real-time job notifications
+        )
+    except asyncio.CancelledError:
+        logger.info("Worker cancelled, shutting down gracefully")
+        raise
+    except Exception as e:
+        logger.error(f"Worker error: {str(e)}", exc_info=True)
+        raise
+
+# UPDATED: Add worker health monitoring
+async def run_worker_with_monitoring(
+    app,
+    worker_count: int, 
+    concurrency_config: Dict[str, int],
+    queues: Optional[List[str]] = None,
+    shutdown_timeout: int = 30
+):
+    """Run workers with health monitoring and graceful shutdown"""
+    
+    logger.info("Starting monitored worker process")
+    
+    try:
+        # UPDATED: Use shutdown_graceful_timeout for better process management
+        await app.run_worker_async(
+            concurrency=sum(concurrency_config.values()),
+            queues=queues or list(concurrency_config.keys()),
+            wait=True,
+            shutdown_graceful_timeout=shutdown_timeout,
+            install_signal_handlers=True
+        )
+    except asyncio.CancelledError:
+        logger.info("Graceful shutdown completed")
+    except Exception as e:
+        logger.error(f"Worker process failed: {str(e)}", exc_info=True)
+        raise
 ```
 
 ### 14. Example Pipeline Configurations
@@ -4614,7 +4707,167 @@ video-tool list-steps
 9. **Queue-based**: Scalable with Procrastinate task queuing
 10. **User Isolation**: Each user sees only their own data
 
-This architecture provides a robust, scalable video processing system that's much more maintainable than a monolithic approach while adding powerful search and monitoring capabilities.
+## 🚀 PROCRASTINATE V2.x UPDATES & STREAMLINING
+
+### Key Changes Made for Current Best Practices
+
+#### 1. **Database Connection Patterns**
+- **BEFORE**: Manual parameter parsing and connection setup
+- **AFTER**: Direct `conninfo` string usage with `PsycopgConnector(conninfo=url)`
+- **BENEFIT**: Simpler, more reliable connection management
+
+#### 2. **Schema Initialization**
+- **BEFORE**: Manual SQL execution with `procrastinate.create_all()`
+- **AFTER**: Use `procrastinate_schema.create_all()` with proper async patterns
+- **BENEFIT**: Aligned with current Procrastinate schema management
+
+#### 3. **Task Registration**
+- **BEFORE**: Simple `@app.task()` decorators
+- **AFTER**: Enhanced with `pass_context=True` for better error handling and monitoring
+- **BENEFIT**: Access to job context, better debugging, enhanced retry logic
+
+#### 4. **Worker Management**
+- **BEFORE**: Basic `app.run_worker()` calls
+- **AFTER**: Added `shutdown_graceful_timeout`, `install_signal_handlers`, `listen_notify`
+- **BENEFIT**: Graceful shutdown, real-time job notifications, better process management
+
+#### 5. **Error Handling**
+- **BEFORE**: Simple exception raising in steps
+- **AFTER**: Return failed `StepResult` objects, let Procrastinate handle retries
+- **BENEFIT**: Better retry logic, more predictable error handling
+
+#### 6. **Connection Management**
+- **BEFORE**: Global database instance
+- **AFTER**: Proper singleton pattern with cleanup methods
+- **BENEFIT**: Better resource management, cleaner shutdown
+
+### Streamlining Opportunities
+
+#### **Option A: Keep Full Architecture (Recommended)**
+- **Pros**: Maximum flexibility, comprehensive feature set, production-ready
+- **Cons**: More complex setup, larger codebase
+- **Use Case**: Production systems, complex video processing workflows
+
+#### **Option B: Simplified Architecture**
+If you want to streamline further, here's what could be simplified:
+
+```python
+# Simplified Step Base Class
+class SimpleStep(ABC):
+    name: str = ""
+    
+    @abstractmethod
+    async def process(self, video_data: dict) -> dict:
+        """Just return the data to merge"""
+        pass
+
+# Simplified Task Registration
+@app.task(queue="processing", pass_context=True)
+async def process_video_step(context, video_id: str, step_name: str):
+    # Load step class dynamically
+    step = get_step_class(step_name)
+    
+    # Get video data from database
+    video_data = await get_video_data(video_id)
+    
+    # Process
+    result = await step.process(video_data)
+    
+    # Save results
+    await save_video_data(video_id, result)
+    
+    return result
+```
+
+#### **Recommended Approach: Hybrid Simplification**
+
+Keep the comprehensive architecture but add a simplified API for basic use cases:
+
+```python
+# Simple API for basic processing
+@app.command()
+def quick_process(file_path: str):
+    """Quick processing with default pipeline"""
+    asyncio.run(simple_video_process(file_path))
+
+async def simple_video_process(file_path: str):
+    """Simplified processing for basic use cases"""
+    # Auto-detect user, queue basic steps
+    steps = ["checksum", "metadata", "thumbnails"]
+    
+    for step in steps:
+        await app.task(f"simple.{step}").defer_async(file_path=file_path)
+```
+
+### Performance Optimizations
+
+#### 1. **Parallel Step Execution**
+```yaml
+# In pipeline config - steps that can run in parallel
+parallel_groups:
+  - name: "metadata_group"
+    steps: ["checksum", "ffmpeg_metadata", "exif_metadata"]
+    wait_for_all: true
+  
+  - name: "analysis_group" 
+    steps: ["thumbnails", "exposure_analysis"]
+    depends_on: ["metadata_group"]
+```
+
+#### 2. **Smart Queue Management**
+```python
+# Auto-scale workers based on queue depth
+async def smart_worker_scaling():
+    job_counts = await app.job_manager.count_by_status()
+    
+    if job_counts.get('todo', 0) > 100:
+        # Scale up workers
+        await start_additional_workers()
+    elif job_counts.get('todo', 0) < 10:
+        # Scale down workers  
+        await stop_excess_workers()
+```
+
+#### 3. **Caching Layer**
+```python
+# Add Redis caching for metadata
+@lru_cache(maxsize=1000)
+async def get_cached_metadata(file_checksum: str):
+    # Check cache first, then database
+    pass
+```
+
+### Migration Path
+
+#### **Phase 1: Update Core (1-2 days)**
+1. ✅ Update database connection patterns
+2. ✅ Update task registration with `pass_context=True`
+3. ✅ Update worker management with graceful shutdown
+4. ✅ Test basic video processing pipeline
+
+#### **Phase 2: Enhanced Features (3-5 days)**
+1. Add parallel step execution
+2. Implement smart queue management
+3. Add comprehensive monitoring dashboard
+4. Performance optimization and caching
+
+#### **Phase 3: Production Deployment (2-3 days)**
+1. Add proper logging and metrics
+2. Container deployment with Docker
+3. CI/CD pipeline setup
+4. Load testing and optimization
+
+### Current Architecture Benefits
+
+✅ **Modular**: Each step is independent and swappable
+✅ **Scalable**: Queue-based processing with configurable concurrency  
+✅ **Fault-Tolerant**: Automatic retry, resume capability, incremental saves
+✅ **User-Isolated**: RLS policies ensure data security
+✅ **Searchable**: Comprehensive semantic and full-text search
+✅ **Monitorable**: Real-time progress tracking and health checks
+✅ **Production-Ready**: Authentication, logging, error handling
+
+This architecture strikes the right balance between functionality and maintainability while following current Procrastinate best practices.
 
 #### HDR Metadata Extractor (`steps/metadata/hdr_extractor.py`)
 

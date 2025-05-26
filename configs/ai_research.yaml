@@ -1,0 +1,57 @@
+name: "ai_research"
+description: "Compare different AI models on same videos"
+version: "1.0"
+
+steps:
+  - category: checksum
+    name: md5_checksum
+    config:
+      enabled: true
+
+  - category: metadata
+    name: ffmpeg_extractor
+    config:
+      enabled: true
+
+  - category: compression
+    name: ffmpeg_compress
+    config:
+      enabled: true
+      params:
+        fps: 10  # Higher FPS for better AI analysis
+        bitrate: "2000k"
+
+  # Run multiple AI analyzers
+  - category: ai_analysis
+    name: gemini_analyzer # Using gemini_analyzer for consistency
+    config:
+      enabled: true
+      queue: ai_gemini
+      params:
+        model: "gemini-2.5-flash" # Plan uses gemini-2.5-flash for gemini_streaming
+        save_to_table: "ai_results_gemini"
+
+  - category: ai_analysis
+    name: claude_analyzer
+    config:
+      enabled: true
+      queue: ai_claude
+      params:
+        model: "claude-3-opus" # As per plan
+        save_to_table: "ai_results_claude"
+
+  - category: ai_analysis
+    name: local_llava # Assuming a step named 'local_llava' exists or will be created
+    config:
+      enabled: true
+      queue: ai_local
+      params:
+        model: "llava-v1.6" # As per plan
+        save_to_table: "ai_results_local"
+
+worker_config:
+  metadata: 4
+  compression: 2
+  ai_gemini: 1
+  ai_claude: 1 # Added back
+  ai_local: 1  # Added back - Each AI gets its own queue
